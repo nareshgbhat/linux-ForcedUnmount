@@ -68,6 +68,15 @@ asmlinkage long sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
                 goto out;
         }
 
+#ifdef CONFIG_FUMOUNT 
+	if (filp->f_mode & FMODE_FUMOUNT) {
+		DEBUG_FUMOUNT;
+   		/* allow no new references to this file */
+		error = -ENXIO;
+		goto out;
+	}
+#endif
+
 	lock_kernel();
 	switch (cmd) {
 		case FIOCLEX:

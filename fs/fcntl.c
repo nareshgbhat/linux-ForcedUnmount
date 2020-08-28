@@ -154,10 +154,26 @@ asmlinkage long sys_dup2(unsigned int oldfd, unsigned int newfd)
 	int err = -EBADF;
 	struct file * file, *tofree;
 	struct files_struct * files = current->files;
+#ifdef CONFIG_FUMOUNT
+	int semaphore_flag = 0;
+#endif
 
 	spin_lock(&files->file_lock);
 	if (!(file = fcheck(oldfd)))
 		goto out_unlock;
+
+#ifdef CONFIG_FUMOUNT
+	if (file->f_mode & FMODE_FUMOUNT) {
+		/* this is a backdoor to close, so we need the close semaphore */
+		down(&close_sem);
+		semaphore_flag = 1;
+
+		/* allow no new references to this file */
+		err = -ENXIO;
+		goto out_unlock;
+	}
+#endif
+
 	err = newfd;
 	if (newfd == oldfd)
 		goto out_unlock;
@@ -194,10 +210,18 @@ asmlinkage long sys_dup2(unsigned int oldfd, unsigned int newfd)
 out:
 	return err;
 out_unlock:
+#ifdef CONFIG_FUMOUNT
+	if (semaphore_flag) 
+ 		up(&close_sem);
+#endif 
 	spin_unlock(&files->file_lock);
 	goto out;
 
 out_fput:
+#ifdef CONFIG_FUMOUNT
+	if (semaphore_flag) 
+ 		up(&close_sem);
+#endif 
 	spin_unlock(&files->file_lock);
 	fput(file);
 	goto out;

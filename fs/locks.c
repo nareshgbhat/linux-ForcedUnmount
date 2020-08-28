@@ -635,6 +635,14 @@ static int locks_block_on_timeout(struct file_lock *blocker, struct file_lock *w
 	int result;
 	locks_insert_block(blocker, waiter);
 	result = interruptible_sleep_on_locked(&waiter->fl_wait, time);
+
+#ifdef CONFIG_FUMOUNT
+	if (waiter->fl_file->f_mode & FMODE_FUMOUNT) {
+		DEBUG_FUMOUNT;
+		result = -ENXIO;
+	}
+#endif
+
 	__locks_delete_block(waiter);
 	return result;
 }
@@ -1521,12 +1529,21 @@ asmlinkage long sys_flock(unsigned int fd, unsigned int cmd)
 	if (error)
 		goto out_free;
 
-	if (filp->f_op && filp->f_op->flock)
-		error = filp->f_op->flock(filp,
-					  (can_sleep) ? F_SETLKW : F_SETLK,
-					  lock);
-	else
-		error = flock_lock_file_wait(filp, lock);
+#ifdef CONFIG_FUMOUNT
+	if (filp->f_mode & FMODE_FUMOUNT) {
+		DEBUG_FUMOUNT;
+		error = -ENXIO;
+	} else { 
+#endif
+		if (filp->f_op && filp->f_op->flock)
+			error = filp->f_op->flock(filp,
+						  (can_sleep) ? F_SETLKW : F_SETLK,
+						  lock);
+		else
+			error = flock_lock_file_wait(filp, lock);
+#ifdef CONFIG_FUMOUNT
+	}	
+#endif
 
  out_free:
 	if (list_empty(&lock->fl_link)) {

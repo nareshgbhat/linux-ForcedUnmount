@@ -492,6 +492,22 @@ config AUTOFS4_FS
 	  local network, you probably do not need an automounter, and can say
 	  N here.
 
+config FUMOUNT
+	bool 'Forced Unmount support' 
+	default y
+	help
+	  If you say Y here, you will be able to force unmount a file system
+	  even if the file system is busy state. It closes all the open file 
+	  on the unmounting file system, flushes their contents, releases 
+	  file locks and tears down memory maps for the files. If unsure, say N.
+
+config FUMOUNT_DEBUG
+	bool "Forced Umount debugging support"
+	depends on FUMOUNT
+	help
+	  If you say Y here, then the forced unmount code will generate
+	  debugging messages.
+
 menu "CD-ROM/DVD Filesystems"
 
 config ISO9660_FS

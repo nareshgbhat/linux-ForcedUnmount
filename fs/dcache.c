@@ -960,6 +960,13 @@ struct dentry * d_lookup(struct dentry * parent, struct qstr * name)
 	struct dentry * dentry = NULL;
 	unsigned long seq;
 
+#ifdef CONFIG_FUMOUNT
+	if (!parent) {
+		DEBUG_FUMOUNT;
+		return dentry;
+	}
+#endif
+
         do {
                 seq = read_seqbegin(&rename_lock);
                 dentry = __d_lookup(parent, name);
@@ -1294,6 +1301,19 @@ static char * __d_path( struct dentry *dentry, struct vfsmount *vfsmnt,
 
 	*--end = '\0';
 	buflen--;
+
+#ifdef CONFIG_FUMOUNT
+	if (!dentry || !vfsmnt) {
+		buflen -= 6;
+		end -= 6;
+
+		DEBUG_FUMOUNT;
+		memcpy(end, "(null)", 6);
+		retval = end;
+		return retval;
+	}
+#endif
+
 	if (!IS_ROOT(dentry) && d_unhashed(dentry)) {
 		buflen -= 10;
 		end -= 10;
@@ -1402,6 +1422,22 @@ asmlinkage long sys_getcwd(char __user *buf, unsigned long size)
 
 	read_lock(&current->fs->lock);
 	pwdmnt = mntget(current->fs->pwdmnt);
+
+#ifdef CONFIG_FUMOUNT
+	if (!pwdmnt) {
+		unsigned long len = 2;
+		char * root_dir = "/";
+
+		DEBUG_FUMOUNT;
+		if (copy_to_user(buf, root_dir, len))
+			error = -EFAULT;
+		else
+			error = len;
+		read_unlock(&current->fs->lock);
+		goto out_freepage;
+	}
+#endif
+
 	pwd = dget(current->fs->pwd);
 	rootmnt = mntget(current->fs->rootmnt);
 	root = dget(current->fs->root);
@@ -1436,6 +1472,9 @@ out:
 	mntput(pwdmnt);
 	dput(root);
 	mntput(rootmnt);
+#ifdef CONFIG_FUMOUNT
+out_freepage:
+#endif
 	free_page((unsigned long) page);
 	return error;
 }

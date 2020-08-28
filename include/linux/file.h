@@ -35,9 +35,15 @@ struct files_struct {
 
 extern void FASTCALL(__fput(struct file *));
 extern void FASTCALL(fput(struct file *));
+#ifdef CONFIG_FUMOUNT
+extern void FASTCALL(file_io_out(struct file *));
+#endif
 
 static inline void fput_light(struct file *file, int fput_needed)
 {
+#ifdef CONFIG_FUMOUNT
+	file_io_out(file);
+#endif
 	if (unlikely(fput_needed))
 		fput(file);
 }

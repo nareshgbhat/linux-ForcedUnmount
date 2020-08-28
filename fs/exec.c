@@ -1105,6 +1105,11 @@ int do_execve(char * filename,
 	if (IS_ERR(file))
 		goto out_kfree;
 
+#ifdef CONFIG_FUMOUNT
+	if(file) {
+		file_io_in(file);
+	}
+#endif
 	sched_exec();
 
 	bprm->p = PAGE_SIZE*MAX_ARG_PAGES-sizeof(void *);
@@ -1178,6 +1183,9 @@ out_mm:
 out_file:
 	if (bprm->file) {
 		allow_write_access(bprm->file);
+#ifdef CONFIG_FUMOUNT
+		file_io_out(bprm->file);
+#endif
 		fput(bprm->file);
 	}
 

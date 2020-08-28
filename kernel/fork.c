@@ -500,8 +500,10 @@ static inline struct fs_struct *__copy_fs_struct(struct fs_struct *old)
 		read_lock(&old->lock);
 		fs->rootmnt = mntget(old->rootmnt);
 		fs->root = dget(old->root);
-		fs->pwdmnt = mntget(old->pwdmnt);
-		fs->pwd = dget(old->pwd);
+		if ( (fs->pwdmnt = mntget(old->pwdmnt)))
+			fs->pwd = dget(old->pwd);
+		else
+			fs->pwd = (struct dentry *)NULL;
 		if (old->altroot) {
 			fs->altrootmnt = mntget(old->altrootmnt);
 			fs->altroot = dget(old->altroot);

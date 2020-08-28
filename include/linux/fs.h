@@ -84,6 +84,12 @@ extern int dir_notify_enable;
 #define FMODE_PREAD	8
 #define FMODE_PWRITE	FMODE_PREAD	/* These go hand in hand */
 
+#ifdef	CONFIG_FUMOUNT
+/* next two mode flags are for fumount */
+#define FMODE_FUMOUNT 	(1UL<<14)	/* fumount is forcing this file to fail */
+#define FMODE_DEFUNCT 	(1UL<<15)	/* fumount has taken the resources away from this file */
+#endif
+
 #define RW_MASK		1
 #define RWA_MASK	2
 #define READ 0
@@ -124,6 +130,9 @@ extern int dir_notify_enable;
 #define MS_VERBOSE	32768
 #define MS_POSIXACL	(1<<16)	/* VFS does not apply the umask */
 #define MS_ONE_SECOND	(1<<17)	/* fs has 1 sec a/m/ctime resolution */
+#ifdef 	CONFIG_FUMOUNT
+#define MS_FUMOUNT	(1<<29) /* Start a FORCED unmount - no more opens */
+#endif
 #define MS_ACTIVE	(1<<30)
 #define MS_NOUSER	(1<<31)
 
@@ -600,13 +609,25 @@ struct file {
 	spinlock_t		f_ep_lock;
 #endif /* #ifdef CONFIG_EPOLL */
 	struct address_space	*f_mapping;
+#ifdef CONFIG_FUMOUNT
+	atomic_t                f_io_count;
+#endif 
 };
 extern spinlock_t files_lock;
+#ifdef CONFIG_FUMOUNT
+extern struct semaphore close_sem; 
+#endif
+
 #define file_list_lock() spin_lock(&files_lock);
 #define file_list_unlock() spin_unlock(&files_lock);
 
 #define get_file(x)	atomic_inc(&(x)->f_count)
 #define file_count(x)	atomic_read(&(x)->f_count)
+
+#ifdef CONFIG_FUMOUNT
+#define file_io_in(x)	atomic_inc(&(x)->f_io_count)
+#define file_io_count(x)	atomic_read(&(x)->f_io_count)
+#endif
 
 #define	MAX_NON_LFS	((1UL<<31) - 1)
 
@@ -745,6 +766,9 @@ extern int send_sigurg(struct fown_struct *fown);
 #define MNT_FORCE	0x00000001	/* Attempt to forcibily umount */
 #define MNT_DETACH	0x00000002	/* Just detach from the tree */
 #define MNT_EXPIRE	0x00000004	/* Mark for expiry */
+#ifdef CONFIG_FUMOUNT
+#define MNT_FFORCE	0x00000008	/* Really forcibily umount - no prisoners */
+#endif
 
 extern struct list_head super_blocks;
 extern spinlock_t sb_lock;
@@ -1658,6 +1682,15 @@ static inline char *alloc_secdata(void)
 static inline void free_secdata(void *secdata)
 { }
 #endif	/* CONFIG_SECURITY */
+
+#ifdef CONFIG_FUMOUNT_DEBUG 
+#define DEBUG_FUMOUNT \
+do { \
+	printk("Forced Unmount: (%s, %d), %s\n", __FILE__, __LINE__, __FUNCTION__); \
+} while (0)
+#else
+#define DEBUG_FUMOUNT
+#endif
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_FS_H */

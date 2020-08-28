@@ -26,6 +26,12 @@
 
 #include <asm/unistd.h>
 
+#ifdef CONFIG_FUMOUNT
+extern int file_move_test(struct file *,  struct super_block *);
+extern void fumount_dnotify_flush(struct file *);
+extern void FASTCALL(fumount_fput(struct file *));
+#endif
+ 
 int vfs_statfs(struct super_block *sb, struct kstatfs *buf)
 {
 	int retval = -ENODEV;
@@ -795,7 +801,18 @@ struct file *dentry_open(struct dentry *dentry, struct vfsmount *mnt, int flags)
 	f->f_vfsmnt = mnt;
 	f->f_pos = 0;
 	f->f_op = fops_get(inode->i_fop);
+#ifdef CONFIG_FUMOUNT 	
+	error = file_move_test(f, inode->i_sb);
+	if (error) {
+		DEBUG_FUMOUNT;
+#ifdef CONFIG_FUMOUNT_DEBUG
+		printk(KERN_DEBUG "Disallowed file open due to pending unmount\n");
+#endif
+		goto cleanup_all;
+	}
+#else
 	file_move(f, &inode->i_sb->s_files);
+#endif
 
 	if (f->f_op && f->f_op->open) {
 		error = f->f_op->open(inode,f);
@@ -1007,13 +1024,61 @@ int filp_close(struct file *filp, fl_owner_t id)
 			retval = err;
 	}
 
-	dnotify_flush(filp, id);
-	locks_remove_posix(filp, id);
-	fput(filp);
+#ifdef CONFIG_FUMOUNT
+	if (filp->f_mode & FMODE_DEFUNCT) {
+		DEBUG_FUMOUNT;
+       		/* We have already removed locks & done an fput */
+		fumount_fput(filp);
+	} else { 
+#endif
+		dnotify_flush(filp, id);
+		locks_remove_posix(filp, id);
+		fput(filp);
+#ifdef CONFIG_FUMOUNT
+	}
+#endif
+
 	return retval;
 }
 
 EXPORT_SYMBOL(filp_close);
+
+#ifdef CONFIG_FUMOUNT
+/*
+ * fumount_close is similar to filp_close.  However, we don't call
+ * locks_remove_posix, since we have lost the files id.  We have
+ * previously chased the locks out of the file object so 
+ * we assume that the locks are not in effect.  We also use a special
+ * version of dnotify_flush that doesn't care about matching the 
+ * id of the caller - it just flushes everything associated with
+ * the filp.
+ */
+void fumount_close(struct file *filp)
+{
+	DEBUG_FUMOUNT;
+
+	if (!file_count(filp)) {
+#ifdef CONFIG_FUMOUNT_DEBUG
+		printk(KERN_ERR "VFS: Close: file count is 0\n");
+#endif
+		return;
+	}
+
+	if (filp->f_op) {
+		if (filp->f_op->flush) {
+			lock_kernel();
+			filp->f_op->flush(filp);
+			unlock_kernel();
+		} else if (filp->f_op->fsync) {
+			lock_kernel();
+			filp->f_op->fsync(filp, filp->f_dentry, 0);
+			unlock_kernel();
+		}
+	}
+	fumount_dnotify_flush(filp);
+	fput(filp);
+}
+#endif
 
 /*
  * Careful here! We test whether the file pointer is NULL before
@@ -1024,22 +1089,40 @@ asmlinkage long sys_close(unsigned int fd)
 {
 	struct file * filp;
 	struct files_struct *files = current->files;
+   	int ret_code;
+#ifdef CONFIG_FUMOUNT
+	int semaphore_flag = 0;
+#endif
 
 	spin_lock(&files->file_lock);
-	if (fd >= files->max_fds)
+	if (!(filp = fcheck(fd)))
 		goto out_unlock;
-	filp = files->fd[fd];
-	if (!filp)
-		goto out_unlock;
+
 	files->fd[fd] = NULL;
 	FD_CLR(fd, files->close_on_exec);
 	__put_unused_fd(files, fd);
 	spin_unlock(&files->file_lock);
-	return filp_close(filp, files);
+
+#ifdef CONFIG_FUMOUNT 
+	if (filp->f_mode & FMODE_FUMOUNT) {
+		down(&close_sem);
+		semaphore_flag = 1;
+	}
+#endif
+	ret_code = filp_close(filp, files);
+
+#ifdef CONFIG_FUMOUNT
+	if (semaphore_flag) 
+		up(&close_sem);
+#endif
+
+exit_sys_close:
+	return (long)ret_code;
 
 out_unlock:
 	spin_unlock(&files->file_lock);
-	return -EBADF;
+	ret_code =  -EBADF;
+	goto exit_sys_close;
 }
 
 EXPORT_SYMBOL(sys_close);

@@ -36,6 +36,12 @@ static inline int sysfs_init(void)
 }
 #endif
 
+#ifdef CONFIG_FUMOUNT
+extern void fs_fumount_close( struct super_block *);
+extern int fs_fumount_clone_list(struct super_block *); 
+extern void fs_fumount_mark_files(struct super_block *);
+#endif
+
 /* spinlock for vfsmount related operations, inplace of dcache_lock */
 spinlock_t vfsmount_lock __cacheline_aligned_in_smp = SPIN_LOCK_UNLOCKED;
 
@@ -175,6 +181,13 @@ clone_mnt(struct vfsmount *old, struct dentry *root)
 void __mntput(struct vfsmount *mnt)
 {
 	struct super_block *sb = mnt->mnt_sb;
+
+#ifdef	CONFIG_FUMOUNT 	
+	if (mnt == NULL) {
+		DEBUG_FUMOUNT;
+		return;
+	}
+#endif
 	dput(mnt->mnt_root);
 	free_vfsmnt(mnt);
 	deactivate_super(sb);
@@ -368,10 +381,17 @@ static int do_umount(struct vfsmount *mnt, int flags)
 {
 	struct super_block * sb = mnt->mnt_sb;
 	int retval;
+#ifdef CONFIG_FUMOUNT   
+	int wait_count;
+#endif
 
 	retval = security_sb_umount(mnt, flags);
 	if (retval)
 		return retval;
+
+#ifdef CONFIG_FUMOUNT_DEBUG
+	printk(KERN_DEBUG "do_umount entered for superblock %x\n", (unsigned int)sb);
+#endif
 
 	/*
 	 * Allow userspace to request a mountpoint be expired rather than
@@ -379,7 +399,11 @@ static int do_umount(struct vfsmount *mnt, int flags)
 	 *  (1) the mark is already set (the mark is cleared by mntput())
 	 *  (2) the usage count == 1 [parent vfsmount] + 1 [sys_umount]
 	 */
+#ifdef CONFIG_FUMOUNT
+	if ((flags & MNT_EXPIRE) && !(flags & MNT_FFORCE)) {	 	 
+#else
 	if (flags & MNT_EXPIRE) {
+#endif
 		if (mnt == current->fs->rootmnt ||
 		    flags & (MNT_FORCE | MNT_DETACH))
 			return -EINVAL;
@@ -402,8 +426,23 @@ static int do_umount(struct vfsmount *mnt, int flags)
 	 */
 
 	lock_kernel();
+
+#ifdef CONFIG_FUMOUNT
+	if ((flags & (MNT_FORCE|MNT_FFORCE)) && sb->s_op->umount_begin) {
+		if (flags & MNT_FFORCE) {
+			/* Doing a "real" force unmount */
+			DEBUG_FUMOUNT;
+			printk(KERN_DEBUG "calling umount_begin for superblock %x\n", 
+				   (unsigned int)sb);
+		}
+#else
 	if( (flags&MNT_FORCE) && sb->s_op->umount_begin)
+#endif	
 		sb->s_op->umount_begin(sb);
+#ifdef CONFIG_FUMOUNT		
+	}
+#endif
+
 	unlock_kernel();
 
 	/*
@@ -434,6 +473,9 @@ static int do_umount(struct vfsmount *mnt, int flags)
 	down_write(&current->namespace->sem);
 	spin_lock(&vfsmount_lock);
 
+#ifdef CONFIG_FUMOUNT
+umount_retry:
+#endif
 	if (atomic_read(&sb->s_active) == 1) {
 		/* last instance - try to be smart */
 		spin_unlock(&vfsmount_lock);
@@ -450,6 +492,168 @@ static int do_umount(struct vfsmount *mnt, int flags)
 			umount_tree(mnt);
 		retval = 0;
 	}
+
+#ifdef CONFIG_FUMOUNT
+       /* 
+	* Now for the dreaded FORCE unmount.  The idea here is that if this isn't
+	* the root fs, and FUMOUNT is requested, and we aren't good to go with a
+	* normal unmount, and we haven't been through here before (you only go 
+	* around once!), and there are no child mounts (if there are children, we
+	* expect the administrator to clean those up first, rather than trying to
+	* force the umount recursively - why - because this is an ugly thing to do
+	* to a running system, and I choose to make the admin know what they are 
+   	* doing!)  then find the references that make the mount point busy and 
+	* eliminate them.  
+	*/
+	if (mnt != current->fs->rootmnt 
+	    && (flags & MNT_FFORCE) 
+	    && (retval != 0) 
+	    && !(sb->s_flags & MS_FUMOUNT) 
+	    && (list_empty(&mnt->mnt_mounts))) {
+		DEBUG_FUMOUNT;
+
+#ifdef CONFIG_FUMOUNT_DEBUG
+		printk(KERN_DEBUG "List empty from mount %x is %x\n", 
+		        (int)mnt, list_empty(&mnt->mnt_mounts));
+#endif
+  	       /* 
+		* Prevent additional references to the mount by setting the MS_FUMOUNT 
+		* flag in the super block and modifying mntget to fail if the flag is
+		* set. The syscalls that attack the file system via a name string
+		* generally end up returning -EBADF. Our objective is to drive the ref 
+		* count to the magic number to allow unmounting.  
+		*/
+		sb->s_flags |= MS_FUMOUNT;
+
+#ifdef CONFIG_FUMOUNT_DEBUG
+		printk(KERN_DEBUG "Set MS_FUMOUNT in sb->s_flags = %lx\n", 
+		       sb->s_flags);
+#endif
+  	       /* 
+		* mark the files as subject to a fumount - this prevents further 
+		* syscalls from starting with the file - instead causing the 
+		* sys_calls to return -ENXIO.  Hopefully, the processes will get
+		* the message, and close the files after a brief wait - note that
+		* we hold onto the mount semaphore - last thing we need is for 
+		* something to mount on the subtree while trying to clean this up.
+		*/
+		fs_fumount_mark_files(sb);
+		spin_unlock(&vfsmount_lock);
+
+  	       /* 
+ 		* wait a bit, in hopes that the processes will take their errors,
+		* close out their files (and hope against hope, satify any sleeps
+		* that have occurred in the vfs - that is, bd reads will complete,
+		* and locks will be released).  It would also be nice if the processes
+		* would get out of related working directories, but I'm dreaming.
+		* If all that happens, then the forced cleanup is easy, and probably
+		* safe. NB - the really proper way to do this is to compute the 
+		* correct magic number for each file object - that is, search the 
+		* process table to find the number of opens associated with the file
+		* object and wait for the file object reference count to fall below
+		* this number - then everything is back out of the kernel sys_calls,
+		* deterministically.
+		*/
+#ifdef CONFIG_FUMOUNT_DEBUG
+		printk(KERN_DEBUG "Mount reference count = %x\n", 
+		       atomic_read(&mnt->mnt_count));
+#endif
+
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(5*HZ);
+
+#ifdef CONFIG_FUMOUNT_DEBUG			  
+		printk(KERN_DEBUG "Back from delay, looking for open files\n");
+		printk(KERN_DEBUG "Mount reference count = %x\n", 
+		       atomic_read(&mnt->mnt_count));
+#endif
+
+		do {
+	   	       /* 
+			* clone the open list - this is in a loop, since we may run out
+			* of file objects, and the fu_mount_close() releases them back 
+			* to the pool. 
+			*/
+			retval = fs_fumount_clone_list(sb); 
+			fs_fumount_close(sb);
+		} while (retval);
+
+#ifdef CONFIG_FUMOUNT_DEBUG
+		printk(KERN_DEBUG "Mount reference count = %x\n", 
+		       atomic_read(&mnt->mnt_count));
+#endif
+
+  	       /* 
+		* Having removed all the file objects from the mount, we can then, 
+		* at  our leisure, it seems, go through the task list and remove all
+		* cwdmnt references to the mount.  This will leave process without
+		* a relative working directory, but it can recover by cd to a rooted
+		* path not on the mount.  At that point the mount count should be at
+		* the magic number, and we will repeat the normal umount process.  
+		*/
+		if (atomic_read(&mnt->mnt_count) > 2) {
+			struct task_struct *task_ptr;
+
+			read_lock(&tasklist_lock);
+			for_each_process(task_ptr) {
+				task_lock(task_ptr);
+				if (task_ptr->fs) {
+					atomic_inc(&task_ptr->fs->count);
+					task_unlock(task_ptr);
+					if (task_ptr->fs->pwdmnt == mnt) {
+						set_fs_pwd(task_ptr->fs, (struct vfsmount *)NULL,
+							   	   (struct dentry *)NULL);
+					}
+					put_fs_struct(task_ptr->fs);
+				} else
+					task_unlock(task_ptr);
+
+				if (atomic_read(&mnt->mnt_count) == 2)
+					break;
+			} 
+			read_unlock(&tasklist_lock);
+		}
+
+#ifdef CONFIG_FUMOUNT_DEBUG
+		printk(KERN_DEBUG "Mount reference count = %x\n", 
+		       atomic_read(&mnt->mnt_count));
+#endif
+		wait_count = 100;
+		while (atomic_read(&mnt->mnt_count) > 2 && wait_count > 0) {
+			current->state = TASK_UNINTERRUPTIBLE;
+			schedule_timeout(3*HZ);
+			wait_count--;
+ #ifdef CONFIG_FUMOUNT_DEBUG
+			printk(KERN_DEBUG "Mount reference count = %d wait counter = "
+				"%d\n", atomic_read(&mnt->mnt_count), wait_count );
+#endif
+		}
+
+#ifdef CONFIG_FUMOUNT_DEBUG
+		if (atomic_read(&mnt->mnt_count) > 2) 
+			printk(KERN_WARNING "Losing resources!\n");
+#endif
+
+		while (atomic_read(&mnt->mnt_count) > 2) {
+	   	       /* 
+			* Okay, can't find all of the references - just drive the count
+			* down. This may leave dangling resources, but too bad.  We are
+			* going to fumount! 
+			*/
+			mntput(mnt);
+		}
+
+#ifdef CONFIG_FUMOUNT_DEBUG
+		printk(KERN_DEBUG "Mount reference count = %x\n", 
+		       atomic_read(&mnt->mnt_count));
+#endif
+
+		spin_lock(&vfsmount_lock);
+		goto umount_retry;
+	}
+	sb->s_flags &= ~MS_FUMOUNT;
+#endif
+
 	spin_unlock(&vfsmount_lock);
 	if (retval)
 		security_sb_umount_busy(mnt);
@@ -469,6 +673,15 @@ asmlinkage long sys_umount(char __user * name, int flags)
 {
 	struct nameidata nd;
 	int retval;
+
+#ifdef CONFIG_FUMOUNT_DEBUG
+	if (flags & MNT_FFORCE) {
+#endif
+		DEBUG_FUMOUNT;
+#ifdef CONFIG_FUMOUNT_DEBUG
+		printk(KERN_DEBUG "Entered sys_umount, flags = %x\n", flags);
+	}
+#endif
 
 	retval = __user_walk(name, LOOKUP_FOLLOW, &nd);
 	if (retval)

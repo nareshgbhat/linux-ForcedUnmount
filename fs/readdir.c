@@ -188,6 +188,10 @@ asmlinkage long sys_getdents(unsigned int fd, struct linux_dirent __user * diren
 	file = fget(fd);
 	if (!file)
 		goto out;
+#ifdef CONFIG_FUMOUNT
+	else
+		file_io_in(file);
+#endif
 
 	buf.current_dir = dirent;
 	buf.previous = NULL;
@@ -207,6 +211,9 @@ asmlinkage long sys_getdents(unsigned int fd, struct linux_dirent __user * diren
 	}
 
 out_putf:
+#ifdef CONFIG_FUMOUNT
+	file_io_out(file);
+#endif
 	fput(file);
 out:
 	return error;
@@ -274,6 +281,10 @@ asmlinkage long sys_getdents64(unsigned int fd, struct linux_dirent64 __user * d
 	file = fget(fd);
 	if (!file)
 		goto out;
+#ifdef CONFIG_FUMOUNT
+	else
+		file_io_in(file);
+#endif
 
 	buf.current_dir = dirent;
 	buf.previous = NULL;
@@ -292,6 +303,9 @@ asmlinkage long sys_getdents64(unsigned int fd, struct linux_dirent64 __user * d
 	}
 
 out_putf:
+#ifdef CONFIG_FUMOUNT
+	file_io_out(file);
+#endif
 	fput(file);
 out:
 	return error;

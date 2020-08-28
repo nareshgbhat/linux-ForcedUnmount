@@ -38,12 +38,36 @@ struct vfsmount
 	struct namespace *mnt_namespace; /* containing namespace */
 };
 
+#ifdef CONFIG_FUMOUNT
+#ifndef _LINUX_FS_H
+#	include <linux/fs.h>
+#endif
+
+/* 
+ * mntget checks that the parameter is not NULL, and now checks to
+ * see that the mount structure's super block is not subject to a
+ * pending forced unmount.  If both checks pass, then the reference
+ * count for the mount structure is atomically incremented and the
+ * mount structure pointer is returned.  Otherwise, NULL is returned.
+ */
+static inline struct vfsmount *mntget(struct vfsmount *mnt)
+{
+	if (mnt) {
+		if (mnt->mnt_sb->s_flags & MS_FUMOUNT) 
+			mnt = NULL;
+		else
+			atomic_inc(&mnt->mnt_count);
+	}
+	return mnt;
+}
+#else
 static inline struct vfsmount *mntget(struct vfsmount *mnt)
 {
 	if (mnt)
 		atomic_inc(&mnt->mnt_count);
 	return mnt;
 }
+#endif	/* CONFIG_FUMOUNT */
 
 extern void __mntput(struct vfsmount *mnt);
 

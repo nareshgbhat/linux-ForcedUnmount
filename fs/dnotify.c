@@ -59,6 +59,38 @@ void dnotify_flush(struct file *filp, fl_owner_t id)
 	spin_unlock(&inode->i_lock);
 }
 
+#ifdef CONFIG_FUMOUNT
+void fumount_dnotify_flush(struct file *filp)
+{
+	struct dnotify_struct *dn;
+	struct dnotify_struct **prev;
+	struct inode *inode;
+
+	DEBUG_FUMOUNT;
+
+	if (!filp || !filp->f_dentry || !filp->f_dentry->d_inode)
+		return;
+
+	inode = filp->f_dentry->d_inode;
+	if (!S_ISDIR(inode->i_mode))
+		return;
+
+	spin_lock(&inode->i_lock);
+	prev = &inode->i_dnotify;
+	while ((dn = *prev) != NULL) {
+		if ( dn->dn_filp == filp ) {
+			*prev = dn->dn_next;
+			redo_inode_mask(inode);
+			kmem_cache_free(dn_cache, dn);
+			break;
+		}
+		prev = &dn->dn_next;
+	}
+	spin_unlock(&inode->i_lock);
+}
+#endif
+
+
 int fcntl_dirnotify(int fd, struct file *filp, unsigned long arg)
 {
 	struct dnotify_struct *dn;
@@ -159,6 +191,14 @@ void dnotify_parent(struct dentry *dentry, unsigned long event)
 
 	if (!dir_notify_enable)
 		return;
+
+#ifdef CONFIG_FUMOUNT
+	/* Skip this if compiled with forced unmount and the dentry is NULL */
+	if (!dentry) {
+		DEBUG_FUMOUNT;
+		return;
+	}
+#endif
 
 	spin_lock(&dentry->d_lock);
 	parent = dentry->d_parent;

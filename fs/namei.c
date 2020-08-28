@@ -490,6 +490,15 @@ fail:
 static inline int do_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	int err = -ELOOP;
+
+#ifdef CONFIG_FUMOUNT
+	if (!nd->mnt) {
+		DEBUG_FUMOUNT;
+		err = -ENXIO;
+		return err;
+	}
+#endif
+
 	if (current->link_count >= MAX_NESTED_LINKS)
 		goto loop;
 	if (current->total_link_count >= 40)
@@ -548,8 +557,24 @@ static int follow_mount(struct vfsmount **mnt, struct dentry **dentry)
 	int res = 0;
 	while (d_mountpoint(*dentry)) {
 		struct vfsmount *mounted = lookup_mnt(*mnt, *dentry);
+
+#ifdef CONFIG_FUMOUNT
+		if (!mounted) {
+			DEBUG_FUMOUNT;
+			res = -1;
+#else
 		if (!mounted)
+#endif
 			break;
+#ifdef CONFIG_FUMOUNT
+		}
+
+		if (mounted->mnt_sb->s_flags & MS_FUMOUNT) {
+			DEBUG_FUMOUNT;
+			res = -ENXIO;
+ 			break;
+		}
+#endif
 		mntput(*mnt);
 		*mnt = mounted;
 		dput(*dentry);
@@ -568,11 +593,26 @@ static inline int __follow_down(struct vfsmount **mnt, struct dentry **dentry)
 
 	mounted = lookup_mnt(*mnt, *dentry);
 	if (mounted) {
+#ifdef CONFIG_FUMOUNT
+		struct dentry *old_dentry = *dentry;
+		DEBUG_FUMOUNT;
+		if( (*mnt = mntget(mounted)) )
+			*dentry = dget(mounted->mnt_root);
+		else
+			*dentry = (struct dentry *) NULL;
+		dput(old_dentry);
+		mntput(mounted->mnt_parent);
+		if ( *mnt )
+			return 1;
+		else
+			return 0;
+#else
 		mntput(*mnt);
 		*mnt = mounted;
 		dput(*dentry);
 		*dentry = dget(mounted->mnt_root);
 		return 1;
+#endif
 	}
 	return 0;
 }
@@ -635,6 +675,15 @@ static int do_lookup(struct nameidata *nd, struct qstr *name,
 	struct vfsmount *mnt = nd->mnt;
 	struct dentry *dentry = __d_lookup(nd->dentry, name);
 
+#ifdef CONFIG_FUMOUNT
+	/* Uh oh.  Walked into a pending FUMOUNT - follow_down has
+	 * released parent mnt and dentry, so just bail
+	 */
+	if (!nd->mnt) {
+		DEBUG_FUMOUNT;
+		return -ENXIO;
+	}
+#endif
 	if (!dentry)
 		goto need_lookup;
 	if (dentry->d_op && dentry->d_op->d_revalidate)
@@ -669,6 +718,18 @@ fail:
  * into the final dentry.
  *
  * We expect 'base' to be positive and a directory.
+ *
+ * FUMOUNT:
+ *  	bad expectation, since the error returns from mntget and
+ *  	path init are not always checked.  Add check up front to
+ *  	ensure that the main routine doesn't fall off of a NULL
+ *  	mount or dentry.  If nothing else, the FUMOUNT will cause
+ *  	NULL mount pointers.  The point is for FUMOUNT to not allow
+ *  	a path lookup into a pending FUMOUNT file system.  This
+ *  	barrier prevents the reference counts from incrementing when
+ *  	FUMOUNT is trying to clean everything up.  I will also add
+ *  	similar checks whenever this routine attempts to take another
+ *  	mount structure reference. 
  */
 int fastcall link_path_walk(const char * name, struct nameidata *nd)
 {
@@ -677,6 +738,14 @@ int fastcall link_path_walk(const char * name, struct nameidata *nd)
 	int err;
 	unsigned int lookup_flags = nd->flags;
 	
+#ifdef  CONFIG_FUMOUNT 
+	if (!nd->mnt || name == NULL) {
+		DEBUG_FUMOUNT;
+		err = -ENXIO;  /* outa' here if bad init_path */
+		goto return_err;
+	}
+#endif
+
 	while (*name=='/')
 		name++;
 	if (!*name)
@@ -730,6 +799,13 @@ int fastcall link_path_walk(const char * name, struct nameidata *nd)
 				if (this.name[1] != '.')
 					break;
 				follow_dotdot(&nd->mnt, &nd->dentry);
+#ifdef CONFIG_FUMOUNT 				
+				if (!nd->mnt) {
+					DEBUG_FUMOUNT;
+					err = -ENXIO;
+					goto return_err;
+				}
+#endif
 				inode = nd->dentry->d_inode;
 				/* fallthrough */
 			case 1:
@@ -750,8 +826,15 @@ int fastcall link_path_walk(const char * name, struct nameidata *nd)
 		if (err)
 			break;
 		/* Check mountpoints.. */
+#ifdef CONFIG_FUMOUNT
+		if (follow_mount(&next.mnt, &next.dentry) < 0) {
+				DEBUG_FUMOUNT;
+				err = -ENXIO;
+				break;
+		}
+#else
 		follow_mount(&next.mnt, &next.dentry);
-
+#endif
 		err = -ENOENT;
 		inode = next.dentry->d_inode;
 		if (!inode)
@@ -762,6 +845,13 @@ int fastcall link_path_walk(const char * name, struct nameidata *nd)
 
 		if (inode->i_op->follow_link) {
 			mntget(next.mnt);
+#ifdef CONFIG_FUMOUNT
+           		if (next.mnt == NULL) {
+				DEBUG_FUMOUNT;
+				err = -ENXIO;
+				goto return_err;
+          	 	}
+#endif
 			err = do_follow_link(next.dentry, nd);
 			dput(next.dentry);
 			mntput(next.mnt);
@@ -798,6 +888,13 @@ last_component:
 				if (this.name[1] != '.')
 					break;
 				follow_dotdot(&nd->mnt, &nd->dentry);
+#ifdef	CONFIG_FUMOUNT 				
+				if (!nd->mnt ) {
+					DEBUG_FUMOUNT;
+					err = -ENXIO;
+					goto return_err;
+				}
+#endif
 				inode = nd->dentry->d_inode;
 				/* fallthrough */
 			case 1:
@@ -811,11 +908,26 @@ last_component:
 		err = do_lookup(nd, &this, &next);
 		if (err)
 			break;
+#ifdef CONFIG_FUMOUNT
+		if (follow_mount(&next.mnt, &next.dentry) < 0) {
+			DEBUG_FUMOUNT;
+			err = -ENXIO;
+			break;
+		}
+#else
 		follow_mount(&next.mnt, &next.dentry);
+#endif
 		inode = next.dentry->d_inode;
 		if ((lookup_flags & LOOKUP_FOLLOW)
 		    && inode && inode->i_op && inode->i_op->follow_link) {
 			mntget(next.mnt);
+#ifdef CONFIG_FUMOUNT 			
+			if (next.mnt == NULL) {
+				DEBUG_FUMOUNT;
+				err = -ENXIO;
+				goto return_err;
+			}
+#endif
 			err = do_follow_link(next.dentry, nd);
 			dput(next.dentry);
 			mntput(next.mnt);
@@ -913,6 +1025,9 @@ static int __emul_lookup_dentry(const char *name, struct nameidata *nd)
 	return 1;
 }
 
+/* Just release old altroot and associated mount and replace with new
+ * values (NULL unless __emul_prefix is non-NULL)
+ */
 void set_fs_altroot(void)
 {
 	char *emul = __emul_prefix();
@@ -1426,6 +1541,17 @@ do_last:
 		if (flag & O_NOFOLLOW)
 			goto exit_dput;
 		while (__follow_down(&nd->mnt,&dentry) && d_mountpoint(dentry));
+ 		
+#ifdef	CONFIG_FUMOUNT 		
+		/* Uh oh.  Walked into a pending FUMOUNT - follow_down has released
+		 * parent mnt and dentry, so just bail
+		 */
+		if (!nd->mnt) {
+			DEBUG_FUMOUNT;
+			error = -ENXIO;
+			return error;
+		}
+#endif
 	}
 	error = -ENOENT;
 	if (!dentry->d_inode)
